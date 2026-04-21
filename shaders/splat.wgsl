@@ -249,3 +249,23 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     return vec4<f32>(in.color_opacity.rgb, alpha);
 }
+
+@fragment
+fn fs_main_stochastic(in: VertexOut) -> @location(0) vec4<f32> {
+    let d = in.screen_offset;
+    let ia = in.cov2d_inv.x;
+    let ib = in.cov2d_inv.y;
+    let id = in.cov2d_inv.w;
+
+    let power = -0.5 * (d.x * d.x * ia + 2.0 * d.x * d.y * ib + d.y * d.y * id);
+
+    if power < -4.6 { discard; }
+
+    let gauss = exp(power);
+    let alpha = in.color_opacity.a * gauss;
+
+    // Reject very transparent pixels early
+    if alpha < 0.01 { discard; }
+
+    return vec4<f32>(in.color_opacity.rgb, alpha);
+}

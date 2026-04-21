@@ -43,7 +43,12 @@ struct ActiveState {
 }
 
 impl ActiveState {
-    async fn new(window: Arc<Window>, egui_ctx: &egui::Context, splats: &[PlyGaussian]) -> Self {
+    async fn new(
+        window: Arc<Window>,
+        egui_ctx: &egui::Context,
+        splats: &[PlyGaussian],
+        stochastic_transparency: bool,
+    ) -> Self {
         let gpu = GpuState::new(window).await;
 
         let egui_state = egui_winit::State::new(
@@ -58,7 +63,7 @@ impl ActiveState {
         let egui_renderer =
             egui_wgpu::Renderer::new(&gpu.ctx.device, gpu.ctx.surface_format, Default::default());
 
-        let splat_renderer = SplatRenderer::new(&gpu.ctx, splats);
+        let splat_renderer = SplatRenderer::new(&gpu.ctx, splats, stochastic_transparency);
         let camera = Camera::default();
 
         Self {
@@ -222,23 +227,21 @@ pub struct SplatApp {
     egui_ctx: egui::Context,
     state: Option<ActiveState>,
     splats: Vec<PlyGaussian>,
+    stochastic_transparency: bool,
     rerun_rec: Option<rerun::RecordingStream>,
 }
 
 impl SplatApp {
-    pub fn new(splats: Vec<PlyGaussian>) -> Self {
+    pub fn new(splats: Vec<PlyGaussian>, stochastic_transparency: bool) -> Self {
         let egui_ctx = egui::Context::default();
         egui_ctx.set_visuals(egui::Visuals::dark());
         Self {
             egui_ctx,
             state: None,
             splats,
+            stochastic_transparency,
             rerun_rec: None,
         }
-    }
-
-    fn setup_pipeline(&mut self) {
-        eprintln!("Setting up pipeline");
     }
 
     /// Takes fields as parameters so it can be called while `self.state` is mutably borrowed.
@@ -263,9 +266,14 @@ impl ApplicationHandler for SplatApp {
                 .unwrap()
                 .pipe(Arc::new);
 
-            let state = ActiveState::new(window, &self.egui_ctx, &self.splats).block_on();
+            let state = ActiveState::new(
+                window,
+                &self.egui_ctx,
+                &self.splats,
+                self.stochastic_transparency,
+            )
+            .block_on();
 
-            self.setup_pipeline();
             state.gpu.window.request_redraw();
             self.state = Some(state);
         }
@@ -310,9 +318,13 @@ impl ApplicationHandler for SplatApp {
                     wgpu::CurrentSurfaceTexture::Lost => {
                         if state.gpu.device_lost.load(Ordering::Relaxed) {
                             let window = Arc::clone(&state.gpu.window);
-                            *state =
-                                ActiveState::new(window, &self.egui_ctx, &self.splats).block_on();
-                            self.setup_pipeline();
+                            *state = ActiveState::new(
+                                window,
+                                &self.egui_ctx,
+                                &self.splats,
+                                self.stochastic_transparency,
+                            )
+                            .block_on();
                         } else {
                             state.gpu.recreate_surface();
                         }

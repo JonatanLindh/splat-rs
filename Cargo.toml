@@ -34,6 +34,7 @@ glam = { version = "0.32.1", features = ["encase"] }
 tap = "1.0.1"
 rayon = "1.11.0"
 seq-macro = "0.3.6"
+clap = { version = "4.6.1", features = ["derive"] }
 # wgpu_edsl = { version = "0.1.0", path = "../../../../Dev/wgpu_edsl/crates/wgpu_edsl" }
 
 [build-dependencies]

@@ -45,7 +45,7 @@ pub struct SplatRenderer {
 }
 
 impl SplatRenderer {
-    pub fn new(ctx: &GpuContext, splats: &[PlyGaussian]) -> Self {
+    pub fn new(ctx: &GpuContext, splats: &[PlyGaussian], stochastic_transparency: bool) -> Self {
         let gpu_splats: Vec<GpuSplat> = splats.iter().map(GpuSplat::from).collect();
 
         // Camera uniform buffer
@@ -90,8 +90,21 @@ impl SplatRenderer {
                     cull_mode: None,
                     ..Default::default()
                 },
-                depth_stencil: None, // painter's algorithm — no depth test
-                multisample: wgpu::MultisampleState::default(),
+                depth_stencil: stochastic_transparency.then(|| wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less), // Closer objects win
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: match stochastic_transparency {
+                    false => wgpu::MultisampleState::default(),
+                    true => wgpu::MultisampleState {
+                        count: 4,
+                        mask: !0,
+                        alpha_to_coverage_enabled: true,
+                    },
+                },
                 multiview_mask: None,
                 cache: None,
             });

@@ -19,20 +19,26 @@ pub mod renderer;
 use std::path::PathBuf;
 
 use app::SplatApp;
+use clap::Parser;
 use winit::event_loop::{ControlFlow, EventLoop};
+
+#[derive(Parser)]
+struct Args {
+    ply: PathBuf,
+
+    #[arg(short, long)]
+    stochastic_transparency: bool,
+}
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    let path = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .ok_or_else(|| color_eyre::eyre::eyre!("Usage: splat-rs <path/to/splat.ply>"))?;
+    let args = Args::parse();
 
-    let splats = ply::load_splats(&path)?;
-    eprintln!("Loaded {} splats from {}", splats.len(), path.display());
+    let splats = ply::load_splats(&args.ply)?;
+    eprintln!("Loaded {} splats from {}", splats.len(), args.ply.display());
 
-    let mut app = SplatApp::new(splats);
+    let mut app = SplatApp::new(splats, args.stochastic_transparency);
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
