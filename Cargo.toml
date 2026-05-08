@@ -11,9 +11,7 @@ opt-level = 3
 
 
 [dependencies]
-wgpu = "29"
-cubecl      = { git = "https://github.com/tracel-ai/cubecl", features = ["wgpu"] }
-cubecl-wgpu = { git = "https://github.com/tracel-ai/cubecl" }
+wgpu = { version = "29", features = ["naga-ir"] }
 winit = "0.30.13"
 
 egui.version = "0.34"
@@ -28,13 +26,16 @@ tracing-subscriber = "0.3.23"
 color-eyre = "0.6.5"
 
 pollster = "0.4.0"
+flume = "0.12"
+naga_oil = "0.22"
 serde = { version = "1", features = ["derive"] }
-serde-ply = "0.2.1"
+serde-ply = "0.2"
 glam = { version = "0.32.1", features = ["encase"] }
 tap = "1.0.1"
-rayon = "1.11.0"
+rayon = "1"
 seq-macro = "0.3.6"
-clap = { version = "4.6.1", features = ["derive"] }
+notify = "8.2.0"
+rfd = "0.15"
 # wgpu_edsl = { version = "0.1.0", path = "../../../../Dev/wgpu_edsl/crates/wgpu_edsl" }
 
 [build-dependencies]

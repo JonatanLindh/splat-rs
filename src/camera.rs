@@ -1,6 +1,6 @@
 use glam::{Mat4, Vec2, Vec3};
 
-use crate::shader_bindings::splat::{CameraUniform, CameraUniformInit};
+use crate::shaders::splat_common::{CameraUniform, CameraUniformInit};
 
 /// Controls:
 /// - Right-click drag  :  look (yaw / pitch)
@@ -28,8 +28,8 @@ impl Default for Camera {
     fn default() -> Self {
         Self {
             position: Vec3::new(0.0, 0.0, 5.0),
-            yaw: std::f32::consts::PI, // look toward -Z (into the scene)
-            pitch: 0.0,
+            yaw: 0.0,
+            pitch: -0.2,
             fov_y: 45_f32.to_radians(),
             near: 0.01,
             far: 1000.0,
@@ -53,8 +53,7 @@ impl Camera {
     }
 
     pub fn view_matrix(&self) -> Mat4 {
-        let flip_y = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
-        Mat4::look_at_rh(self.position, self.position + self.forward(), Vec3::Y) * flip_y
+        Mat4::look_at_rh(self.position, self.position + self.forward(), Vec3::Y)
     }
 
     pub fn proj_matrix(&self, width: u32, height: u32) -> Mat4 {

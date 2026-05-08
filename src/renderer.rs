@@ -4,30 +4,15 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use crate::{
     camera::Camera,
     gpu::GpuContext,
-    ply::PlyGaussian,
     radix_sort_cpu::{self, RadixSort},
-    shader_bindings::{
+    shaders::{
         self,
-        splat::{
-            CameraUniform, GpuSplat, GpuSplatInit, WgpuBindGroup0, WgpuBindGroup0Entries,
+        splat_common::{
+            CameraUniform, GpuSplat, WgpuBindGroup0, WgpuBindGroup0Entries,
             WgpuBindGroup0EntriesParams,
         },
     },
 };
-
-impl From<&PlyGaussian> for GpuSplat {
-    fn from(s: &PlyGaussian) -> Self {
-        GpuSplatInit {
-            position: s.position(),
-            opacity: s.opacity,
-            scale: s.log_scale(),
-            rotation: s.rotation().into(),
-            sh_dc: s.sh_dc(),
-            sh_rest: s.sh_rest(),
-        }
-        .build()
-    }
-}
 
 pub struct SplatRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -35,9 +20,10 @@ pub struct SplatRenderer {
     camera_buf: wgpu::Buffer,
     splat_buf: wgpu::Buffer,
     splat_count: u32,
+    stochastic_transparency: bool,
 
     /// unsorted GPU splats
-    gpu_splats: Vec<GpuSplat>,
+    splats: Vec<GpuSplat>,
     /// scratch for sorted gpu splats
     sorted_splats: Vec<GpuSplat>,
     /// scratch for depth-sorting indices
@@ -45,9 +31,12 @@ pub struct SplatRenderer {
 }
 
 impl SplatRenderer {
-    pub fn new(ctx: &GpuContext, splats: &[PlyGaussian], stochastic_transparency: bool) -> Self {
-        let gpu_splats: Vec<GpuSplat> = splats.iter().map(GpuSplat::from).collect();
-
+    pub fn new(
+        ctx: &GpuContext,
+        splats: Vec<GpuSplat>,
+        stochastic_transparency: bool,
+        msaa_samples: u32,
+    ) -> Self {
         // Camera uniform buffer
         let camera_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Uniform"),
@@ -59,55 +48,85 @@ impl SplatRenderer {
         // Splat storage buffer
         let splat_buf = ctx.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Splat Storage"),
-            contents: bytemuck::cast_slice(&gpu_splats),
+            contents: bytemuck::cast_slice(&splats),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         // Shader & pipeline
-        let se = shader_bindings::ShaderEntry::Splat;
-        let shader = se.create_shader_module_embed_source(&ctx.device);
+        let (se, shader) = if stochastic_transparency {
+            let se = shaders::ShaderEntry::SplatStochastic;
+            let shader = se.create_shader_module_embed_source(&ctx.device);
+            (se, shader)
+        } else {
+            let se = shaders::ShaderEntry::Splat;
+            let shader = se.create_shader_module_embed_source(&ctx.device);
+            (se, shader)
+        };
+
         let pipeline_layout = se.create_pipeline_layout(&ctx.device);
 
-        let pipeline = ctx
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Splat Pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: shader_bindings::splat::vertex_state(
-                    &shader,
-                    &shader_bindings::splat::vs_main_entry(),
-                ),
-                fragment: Some(shader_bindings::splat::fragment_state(
-                    &shader,
-                    &shader_bindings::splat::fs_main_entry([Some(wgpu::ColorTargetState {
-                        format: ctx.surface_format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })]),
-                )),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: stochastic_transparency.then(|| wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less), // Closer objects win
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: match stochastic_transparency {
-                    false => wgpu::MultisampleState::default(),
-                    true => wgpu::MultisampleState {
-                        count: 4,
+        let pipeline = if stochastic_transparency {
+            ctx.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Splat Pipeline (Stochastic)"),
+                    layout: Some(&pipeline_layout),
+                    vertex: shaders::splat_stochastic::vertex_state(
+                        &shader,
+                        &shaders::splat_stochastic::vs_main_entry(),
+                    ),
+                    fragment: Some(shaders::splat_stochastic::fragment_state(
+                        &shader,
+                        &shaders::splat_stochastic::fs_main_entry([Some(wgpu::ColorTargetState {
+                            format: ctx.surface_format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })]),
+                    )),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: msaa_samples,
                         mask: !0,
                         alpha_to_coverage_enabled: true,
                     },
-                },
-                multiview_mask: None,
-                cache: None,
-            });
+                    multiview_mask: None,
+                    cache: None,
+                })
+        } else {
+            ctx.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Splat Pipeline (Standard)"),
+                    layout: Some(&pipeline_layout),
+                    vertex: shaders::splat::vertex_state(&shader, &shaders::splat::vs_main_entry()),
+                    fragment: Some(shaders::splat::fragment_state(
+                        &shader,
+                        &shaders::splat::fs_main_entry([Some(wgpu::ColorTargetState {
+                            format: ctx.surface_format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })]),
+                    )),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
 
         // Bind group
         let bind_group = WgpuBindGroup0::from_bindings(
@@ -118,9 +137,9 @@ impl SplatRenderer {
             }),
         );
 
-        let splat_count = gpu_splats.len() as u32;
-        let sorted_splats = Vec::with_capacity(gpu_splats.len());
-        let depth_indices = Vec::with_capacity(gpu_splats.len());
+        let splat_count = splats.len() as u32;
+        let sorted_splats = Vec::with_capacity(splats.len());
+        let depth_indices = Vec::with_capacity(splats.len());
 
         Self {
             pipeline,
@@ -128,7 +147,8 @@ impl SplatRenderer {
             camera_buf,
             splat_buf,
             splat_count,
-            gpu_splats,
+            stochastic_transparency,
+            splats,
             sorted_splats,
             depth_indices,
         }
@@ -139,11 +159,15 @@ impl SplatRenderer {
         ctx.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&[cam_uniform]));
 
+        if self.stochastic_transparency {
+            return;
+        }
+
         let view = camera.view_matrix();
         let z_row = view.row(2).truncate();
 
         self.depth_indices.clear();
-        self.gpu_splats
+        self.splats
             .par_iter()
             .enumerate()
             .map(|(i, splat)| {
@@ -158,7 +182,7 @@ impl SplatRenderer {
         self.sorted_splats.extend(
             self.depth_indices
                 .iter()
-                .map(|&(_, original_idx)| self.gpu_splats[original_idx]),
+                .map(|&(_, original_idx)| self.splats[original_idx]),
         );
 
         ctx.queue.write_buffer(
@@ -166,6 +190,89 @@ impl SplatRenderer {
             0,
             bytemuck::cast_slice(&self.sorted_splats),
         );
+    }
+
+    /// Rebuild the pipeline with a new shader module (for hot-reloading).
+    pub fn rebuild_pipeline(&mut self, ctx: &GpuContext, shader: &wgpu::ShaderModule) {
+        tracing::info!(
+            "Rebuilding pipeline (mode: {})",
+            if self.stochastic_transparency {
+                "stochastic"
+            } else {
+                "standard"
+            }
+        );
+
+        let se = if self.stochastic_transparency {
+            shaders::ShaderEntry::SplatStochastic
+        } else {
+            shaders::ShaderEntry::Splat
+        };
+
+        let pipeline_layout = se.create_pipeline_layout(&ctx.device);
+
+        self.pipeline = if self.stochastic_transparency {
+            ctx.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Splat Pipeline (Stochastic)"),
+                    layout: Some(&pipeline_layout),
+                    vertex: shaders::splat_stochastic::vertex_state(
+                        shader,
+                        &shaders::splat_stochastic::vs_main_entry(),
+                    ),
+                    fragment: Some(shaders::splat_stochastic::fragment_state(
+                        shader,
+                        &shaders::splat_stochastic::fs_main_entry([Some(wgpu::ColorTargetState {
+                            format: ctx.surface_format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })]),
+                    )),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: 4,
+                        mask: !0,
+                        alpha_to_coverage_enabled: true,
+                    },
+                    multiview_mask: None,
+                    cache: None,
+                })
+        } else {
+            ctx.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Splat Pipeline (Standard)"),
+                    layout: Some(&pipeline_layout),
+                    vertex: shaders::splat::vertex_state(shader, &shaders::splat::vs_main_entry()),
+                    fragment: Some(shaders::splat::fragment_state(
+                        shader,
+                        &shaders::splat::fs_main_entry([Some(wgpu::ColorTargetState {
+                            format: ctx.surface_format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })]),
+                    )),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        };
     }
 
     /// Record the splat draw call into an active render pass.

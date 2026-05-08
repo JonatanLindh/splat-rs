@@ -4,21 +4,16 @@ use glam::{Quat, Vec3};
 use seq_macro::seq;
 use serde::Deserialize;
 
+use crate::shaders::splat_common::{GpuSplat, GpuSplatInit};
+
 seq!(N in 0..=44 {
     /// One Gaussian splat as stored in a 3DGS `.ply` file.
     #[derive(Debug, Clone, Deserialize)]
-    pub struct PlyGaussian {
+    struct PlyGaussian {
         // Position
         pub x: f32,
         pub y: f32,
         pub z: f32,
-
-        #[serde(default)]
-        pub nx: f32,
-        #[serde(default)]
-        pub ny: f32,
-        #[serde(default)]
-        pub nz: f32,
 
         // DC spherical-harmonics coefficients (one per RGB channel)
         pub f_dc_0: f32,
@@ -73,25 +68,67 @@ impl PlyGaussian {
     }
 }
 
+impl From<PlyGaussian> for GpuSplat {
+    fn from(s: PlyGaussian) -> Self {
+        let sign = Vec3::new(1., -1., -1.);
+        let position = s.position() * sign;
+
+        let rotation = {
+            let q = s.rotation();
+            Quat::from_xyzw(
+                q.x * sign.x,
+                q.y * sign.y,
+                q.z * sign.z,
+                q.w * sign.element_product(),
+            )
+            .normalize()
+        };
+
+        let flip_indices = [0, 1, 3, 6, 8, 10, 11, 13];
+        let mut sh_rest = s.sh_rest();
+
+        // Flip the coefficient for Red, Green, and Blue planes
+        for &base_idx in &flip_indices {
+            for color_offset in [0, 15, 30] {
+                let idx = base_idx + color_offset;
+                if idx < sh_rest.len() {
+                    sh_rest[idx] = -sh_rest[idx];
+                }
+            }
+        }
+
+        GpuSplatInit {
+            position,
+            opacity: s.opacity,
+            scale: s.log_scale(),
+            rotation: rotation.into(),
+            sh_dc: s.sh_dc(),
+            sh_rest,
+        }
+        .build()
+    }
+}
+
 /// Load all Gaussian splats from a binary PLY file.
-pub fn load_splats(path: &Path) -> color_eyre::Result<Vec<PlyGaussian>> {
+pub fn load_splats(path: &Path) -> color_eyre::Result<Vec<GpuSplat>> {
     let file = BufReader::new(File::open(path)?);
     let mut reader = serde_ply::PlyReader::from_reader(file)?;
     let splats: Vec<PlyGaussian> = reader.next_element()?;
-    Ok(splats)
+
+    Ok(splats.into_iter().map(GpuSplat::from).collect())
 }
 
 /// Maximum splats sent to Rerun in one call
 const MAX_RERUN_SPLATS: usize = 200_000;
 
 /// Log splats to a Rerun recording stream as `Ellipsoids3D`.
-pub fn log_splats_to_rerun(rec: &rerun::RecordingStream, splats: &[PlyGaussian]) {
+pub fn log_splats_to_rerun(rec: &rerun::RecordingStream, splats: &[GpuSplat]) {
     // SH DC → linear RGB: color = 0.5 + SH_C0 * f_dc,  SH_C0 = 1/sqrt(4π)
     #[allow(clippy::excessive_precision)]
     const SH_C0: f32 = 0.28209479177387814_f32;
 
     let step = (splats.len() / MAX_RERUN_SPLATS).max(1);
-    let sampled: Vec<&PlyGaussian> = splats.iter().step_by(step).collect();
+    let sampled: Vec<&GpuSplat> = splats.iter().step_by(step).collect();
 
     if step > 1 {
         eprintln!(
@@ -101,26 +138,19 @@ pub fn log_splats_to_rerun(rec: &rerun::RecordingStream, splats: &[PlyGaussian])
         );
     }
 
-    let centers: Vec<[f32; 3]> = sampled.iter().map(|s| [s.x, s.y, s.z]).collect();
-
-    let half_sizes: Vec<[f32; 3]> = sampled
-        .iter()
-        .map(|s| [s.scale_0.exp(), s.scale_1.exp(), s.scale_2.exp()])
-        .collect();
+    let centers: Vec<[f32; 3]> = sampled.iter().map(|s| s.position.to_array()).collect();
+    let half_sizes: Vec<[f32; 3]> = sampled.iter().map(|s| s.scale.exp().to_array()).collect();
 
     // 3DGS stores quaternion as (w, x, y, z) = (rot_0, rot_1, rot_2, rot_3).
     // Rerun expects (x, y, z, w).
-    let quaternions: Vec<[f32; 4]> = sampled
-        .iter()
-        .map(|s| [s.rot_1, s.rot_2, s.rot_3, s.rot_0])
-        .collect();
+    let quaternions: Vec<[f32; 4]> = sampled.iter().map(|s| s.rotation.to_array()).collect();
 
     let colors: Vec<rerun::Color> = sampled
         .iter()
         .map(|s| {
-            let r = ((0.5 + SH_C0 * s.f_dc_0).clamp(0.0, 1.0) * 255.0) as u8;
-            let g = ((0.5 + SH_C0 * s.f_dc_1).clamp(0.0, 1.0) * 255.0) as u8;
-            let b = ((0.5 + SH_C0 * s.f_dc_2).clamp(0.0, 1.0) * 255.0) as u8;
+            let r = ((0.5 + SH_C0 * s.sh_dc.x).clamp(0.0, 1.0) * 255.0) as u8;
+            let g = ((0.5 + SH_C0 * s.sh_dc.y).clamp(0.0, 1.0) * 255.0) as u8;
+            let b = ((0.5 + SH_C0 * s.sh_dc.z).clamp(0.0, 1.0) * 255.0) as u8;
             rerun::Color::from_rgb(r, g, b)
         })
         .collect();

@@ -1,6 +1,5 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use pollster::FutureExt;
 use tap::Pipe;
 use winit::{
     application::ApplicationHandler, event::WindowEvent, event_loop::ActiveEventLoop,
@@ -9,7 +8,13 @@ use winit::{
 
 use glam::Vec3;
 
-use crate::{camera::Camera, gpu::GpuState, ply::PlyGaussian, renderer::SplatRenderer};
+use crate::{
+    camera::Camera,
+    gpu::{GpuContext, GpuState},
+    hot_reload::ShaderWatcher,
+    renderer::SplatRenderer,
+    shaders::splat_common::GpuSplat,
+};
 
 // ── UI output ─────────────────────────────────────────────────────────────────
 
@@ -17,6 +22,8 @@ use crate::{camera::Camera, gpu::GpuState, ply::PlyGaussian, renderer::SplatRend
 #[derive(Default)]
 struct UiOutput {
     open_rerun: bool,
+    load_file: bool,
+    transparency_changed: bool,
     /// Right-drag delta in screen pixels.
     look_delta: egui::Vec2,
     /// Scroll wheel, positive = up (used to scale move speed).
@@ -31,7 +38,67 @@ struct UiOutput {
     dt: f32,
 }
 
+/// Shared app state that needs to be accessed from UI.
+struct AppState<'a> {
+    splat_count: usize,
+    ply_path: &'a Option<std::path::PathBuf>,
+    stochastic_transparency: &'a mut bool,
+    msaa_samples: &'a mut u32,
+}
+
 // ── Active GPU + UI state ─────────────────────────────────────────────────────
+
+/// Transparency rendering mode with associated resources
+#[allow(clippy::large_enum_variant)]
+enum TransparencyMode {
+    /// Standard alpha blending (no MSAA, no depth buffer)
+    Normal,
+    /// Stochastic transparency with MSAA + depth buffer
+    Stochastic(MsaaDepth),
+}
+
+struct MsaaDepth {
+    msaa_texture: wgpu::Texture,
+    msaa_view: wgpu::TextureView,
+    depth_texture: wgpu::Texture,
+    depth_view: wgpu::TextureView,
+}
+
+impl MsaaDepth {
+    fn new(gpu_ctx: &GpuContext, size: wgpu::Extent3d, msaa_samples: u32) -> MsaaDepth {
+        let msaa_texture = gpu_ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("MSAA Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: msaa_samples,
+            dimension: wgpu::TextureDimension::D2,
+            format: gpu_ctx.surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        let depth_texture = gpu_ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: msaa_samples,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        let msaa_view = msaa_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        MsaaDepth {
+            msaa_texture,
+            msaa_view,
+            depth_texture,
+            depth_view,
+        }
+    }
+}
 
 /// Exists only while the app is resumed.
 struct ActiveState {
@@ -40,14 +107,20 @@ struct ActiveState {
     egui_renderer: egui_wgpu::Renderer,
     splat_renderer: SplatRenderer,
     camera: Camera,
+
+    watcher: ShaderWatcher,
+
+    transparency_mode: TransparencyMode,
+    msaa_samples: u32,
 }
 
 impl ActiveState {
     async fn new(
         window: Arc<Window>,
         egui_ctx: &egui::Context,
-        splats: &[PlyGaussian],
+        splats: Vec<GpuSplat>,
         stochastic_transparency: bool,
+        msaa_samples: u32,
     ) -> Self {
         let gpu = GpuState::new(window).await;
 
@@ -63,8 +136,24 @@ impl ActiveState {
         let egui_renderer =
             egui_wgpu::Renderer::new(&gpu.ctx.device, gpu.ctx.surface_format, Default::default());
 
-        let splat_renderer = SplatRenderer::new(&gpu.ctx, splats, stochastic_transparency);
+        let splat_renderer =
+            SplatRenderer::new(&gpu.ctx, splats, stochastic_transparency, msaa_samples);
         let camera = Camera::default();
+
+        let watcher = ShaderWatcher::new();
+
+        // Create transparency mode with resources
+        let transparency_mode = if stochastic_transparency {
+            let size = wgpu::Extent3d {
+                width: gpu.surface_config.width,
+                height: gpu.surface_config.height,
+                depth_or_array_layers: 1,
+            };
+
+            TransparencyMode::Stochastic(MsaaDepth::new(&gpu.ctx, size, msaa_samples))
+        } else {
+            TransparencyMode::Normal
+        };
 
         Self {
             gpu,
@@ -72,6 +161,37 @@ impl ActiveState {
             egui_renderer,
             splat_renderer,
             camera,
+            watcher,
+            transparency_mode,
+            msaa_samples,
+        }
+    }
+
+    fn resize_render_targets(&mut self, width: u32, height: u32) {
+        if let TransparencyMode::Stochastic { .. } = self.transparency_mode {
+            let size = wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            };
+
+            self.transparency_mode =
+                TransparencyMode::Stochastic(MsaaDepth::new(&self.gpu.ctx, size, self.msaa_samples))
+        }
+    }
+
+    fn try_reload_shaders(&mut self, stochastic_transparency: bool) {
+        use crate::hot_reload::reload_shader_module;
+        use crate::shaders::ShaderEntry;
+
+        let entry = if stochastic_transparency {
+            ShaderEntry::SplatStochastic
+        } else {
+            ShaderEntry::Splat
+        };
+
+        if let Some(module) = reload_shader_module(&self.gpu.ctx, entry) {
+            self.splat_renderer.rebuild_pipeline(&self.gpu.ctx, &module);
         }
     }
 
@@ -80,7 +200,7 @@ impl ActiveState {
     fn run_ui(
         &mut self,
         egui_ctx: &egui::Context,
-        splat_count: usize,
+        app_state: &mut AppState,
     ) -> (egui::FullOutput, UiOutput) {
         let raw_input = self.egui_state.take_egui_input(&self.gpu.window);
 
@@ -105,9 +225,66 @@ impl ActiveState {
 
                     ui.add_space(4.0);
                     let fps = ui.input(|i| 1.0 / i.stable_dt);
-                    ui.label(format!("{splat_count} splats  |  {fps:.0} fps"));
+                    ui.label(format!("{} splats  |  {fps:.0} fps", app_state.splat_count));
 
                     ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    // File loading
+                    ui.label(egui::RichText::new("File").strong());
+                    if let Some(path) = &app_state.ply_path {
+                        ui.label(format!(
+                            "Loaded: {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    } else {
+                        ui.label("No file loaded");
+                    }
+
+                    if ui.button("Load PLY file...").clicked() {
+                        ui_out.load_file = true;
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    // Rendering options
+                    ui.label(egui::RichText::new("Rendering").strong());
+                    if ui
+                        .checkbox(app_state.stochastic_transparency, "Stochastic Transparency")
+                        .changed()
+                    {
+                        ui_out.transparency_changed = true;
+                    }
+
+                    if *app_state.stochastic_transparency {
+                        ui.label(egui::RichText::new("MSAA Samples").strong());
+                        for sample_count in self
+                            .gpu
+                            .adapter
+                            .get_texture_format_features(self.gpu.surface_config.format)
+                            .flags
+                            .supported_sample_counts()
+                        {
+                            if ui
+                                .radio_value(
+                                    app_state.msaa_samples,
+                                    sample_count,
+                                    sample_count.to_string(),
+                                )
+                                .clicked()
+                            {
+                                ui_out.transparency_changed = true;
+                            }
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
                     if ui.button("Visualize in Rerun").clicked() {
                         ui_out.open_rerun = true;
                     }
@@ -223,29 +400,113 @@ impl ActiveState {
 
 // ── Application ───────────────────────────────────────────────────────────────
 
+fn spawn_gpu_init(
+    tx: flume::Sender<(ActiveState, egui::Context)>,
+    window: Arc<Window>,
+    splats: Vec<GpuSplat>,
+    stochastic_transparency: bool,
+    msaa_samples: u32,
+) {
+    let win = Arc::clone(&window);
+    let future = async move {
+        // Create fresh egui context to avoid timing issues during reinit
+        let egui_ctx = egui::Context::default();
+        egui_ctx.set_visuals(egui::Visuals::dark());
+
+        let state = ActiveState::new(
+            win,
+            &egui_ctx,
+            splats,
+            stochastic_transparency,
+            msaa_samples,
+        )
+        .await;
+        let _ = tx.send_async((state, egui_ctx)).await;
+        window.request_redraw();
+    };
+
+    std::thread::spawn(|| pollster::block_on(future));
+}
+
 pub struct SplatApp {
     egui_ctx: egui::Context,
     state: Option<ActiveState>,
-    splats: Vec<PlyGaussian>,
+    tx: flume::Sender<(ActiveState, egui::Context)>,
+    rx: flume::Receiver<(ActiveState, egui::Context)>,
+    splats: Vec<GpuSplat>,
     stochastic_transparency: bool,
+    msaa_samples: u32,
     rerun_rec: Option<rerun::RecordingStream>,
+    ply_path: Option<std::path::PathBuf>,
+    needs_reinit: bool,
+}
+
+impl Default for SplatApp {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SplatApp {
-    pub fn new(splats: Vec<PlyGaussian>, stochastic_transparency: bool) -> Self {
+    pub fn new() -> Self {
         let egui_ctx = egui::Context::default();
         egui_ctx.set_visuals(egui::Visuals::dark());
+        let (tx, rx) = flume::bounded(1);
+
+        // Try to load default PLY file if it exists
+        let (splats, ply_path) = Self::try_load_default_ply();
+
         Self {
             egui_ctx,
             state: None,
+            tx,
+            rx,
             splats,
-            stochastic_transparency,
+            stochastic_transparency: false,
+            msaa_samples: 4,
             rerun_rec: None,
+            ply_path,
+            needs_reinit: false,
+        }
+    }
+
+    fn try_load_default_ply() -> (Vec<GpuSplat>, Option<std::path::PathBuf>) {
+        let default_files = ["point_cloud.ply", "train.ply"];
+
+        for file in &default_files {
+            let path = std::path::PathBuf::from(file);
+            if path.exists() {
+                match crate::ply::load_splats(&path) {
+                    Ok(splats) => {
+                        tracing::info!("Loaded {} splats from {}", splats.len(), path.display());
+                        return (splats, Some(path));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load {}: {}", path.display(), e);
+                    }
+                }
+            }
+        }
+
+        (Vec::new(), None)
+    }
+
+    fn load_ply_file(&mut self, path: std::path::PathBuf) {
+        match crate::ply::load_splats(&path) {
+            Ok(splats) => {
+                tracing::info!("Loaded {} splats from {}", splats.len(), path.display());
+                self.splats = splats;
+                self.ply_path = Some(path);
+                // Caller should set needs_reinit = true after calling this
+            }
+            Err(e) => {
+                tracing::error!("Failed to load {}: {}", path.display(), e);
+            }
         }
     }
 
     /// Takes fields as parameters so it can be called while `self.state` is mutably borrowed.
-    fn open_in_rerun(rerun_rec: &mut Option<rerun::RecordingStream>, splats: &[PlyGaussian]) {
+    fn open_in_rerun(rerun_rec: &mut Option<rerun::RecordingStream>, splats: &[GpuSplat]) {
         if rerun_rec.is_none() {
             match rerun::RecordingStreamBuilder::new("splat-rs").spawn() {
                 Ok(rec) => *rerun_rec = Some(rec),
@@ -266,16 +527,13 @@ impl ApplicationHandler for SplatApp {
                 .unwrap()
                 .pipe(Arc::new);
 
-            let state = ActiveState::new(
+            spawn_gpu_init(
+                self.tx.clone(),
                 window,
-                &self.egui_ctx,
-                &self.splats,
+                self.splats.clone(),
                 self.stochastic_transparency,
-            )
-            .block_on();
-
-            state.gpu.window.request_redraw();
-            self.state = Some(state);
+                self.msaa_samples,
+            );
         }
     }
 
@@ -285,6 +543,14 @@ impl ApplicationHandler for SplatApp {
         window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
+        // Pick up newly initialized state from the async init channel
+        if self.state.is_none()
+            && let Ok((state, egui_ctx)) = self.rx.try_recv()
+        {
+            self.state = Some(state);
+            self.egui_ctx = egui_ctx;
+        }
+
         let Some(state) = &mut self.state else { return };
 
         if state.gpu.window.id() != window_id {
@@ -296,15 +562,37 @@ impl ApplicationHandler for SplatApp {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.state = None;
                 event_loop.exit();
             }
 
             WindowEvent::Resized(size) => {
                 state.gpu.resize(size);
+                state.resize_render_targets(size.width, size.height);
                 state.gpu.window.request_redraw();
             }
 
             WindowEvent::RedrawRequested => {
+                // Handle reinitialization request from previous frame
+                if self.needs_reinit {
+                    self.needs_reinit = false;
+                    let window = Arc::clone(&state.gpu.window);
+                    self.state = None;
+                    spawn_gpu_init(
+                        self.tx.clone(),
+                        window,
+                        self.splats.clone(),
+                        self.stochastic_transparency,
+                        self.msaa_samples,
+                    );
+                    return;
+                }
+
+                // Hot-reload shaders in debug builds
+                if state.watcher.poll() {
+                    state.try_reload_shaders(self.stochastic_transparency);
+                }
+
                 let output = match state.gpu.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t) => t,
                     wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
@@ -318,24 +606,25 @@ impl ApplicationHandler for SplatApp {
                     wgpu::CurrentSurfaceTexture::Lost => {
                         if state.gpu.device_lost.load(Ordering::Relaxed) {
                             let window = Arc::clone(&state.gpu.window);
-                            *state = ActiveState::new(
+                            self.state = None;
+                            spawn_gpu_init(
+                                self.tx.clone(),
                                 window,
-                                &self.egui_ctx,
-                                &self.splats,
+                                self.splats.clone(),
                                 self.stochastic_transparency,
-                            )
-                            .block_on();
+                                self.msaa_samples,
+                            );
                         } else {
                             state.gpu.recreate_surface();
                         }
                         return;
                     }
                     wgpu::CurrentSurfaceTexture::Timeout => {
-                        eprintln!("Surface texture timeout");
+                        tracing::warn!("Surface texture timeout");
                         return;
                     }
                     _ => {
-                        eprintln!("Dropped frame");
+                        tracing::warn!("Dropped frame");
                         return;
                     }
                 };
@@ -357,7 +646,29 @@ impl ApplicationHandler for SplatApp {
                 let h = state.gpu.surface_config.height;
 
                 // Run egui UI logic, collect camera input
-                let (full_output, ui_out) = state.run_ui(&self.egui_ctx, self.splats.len());
+                let mut app_state = AppState {
+                    splat_count: self.splats.len(),
+                    ply_path: &self.ply_path,
+                    stochastic_transparency: &mut self.stochastic_transparency,
+                    msaa_samples: &mut self.msaa_samples,
+                };
+                let (full_output, ui_out) = state.run_ui(&self.egui_ctx, &mut app_state);
+
+                // Handle UI events that require reinit - defer until after this frame
+                let mut load_file_path = None;
+                if ui_out.load_file
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PLY files", &["ply"])
+                        .pick_file()
+                {
+                    load_file_path = Some(path);
+                    self.needs_reinit = true;
+                }
+
+                if ui_out.transparency_changed {
+                    // Defer reinitialization until after this frame is presented
+                    self.needs_reinit = true;
+                }
 
                 // Apply camera input
                 state.camera.look(ui_out.look_delta.x, ui_out.look_delta.y);
@@ -375,18 +686,45 @@ impl ApplicationHandler for SplatApp {
                     .splat_renderer
                     .prepare(&state.gpu.ctx, &state.camera, w, h);
                 {
+                    let (color_view, resolve_target, depth_stencil_attachment) =
+                        match &state.transparency_mode {
+                            TransparencyMode::Stochastic(MsaaDepth {
+                                msaa_view,
+                                depth_view,
+                                ..
+                            }) => {
+                                // MSAA + depth for stochastic transparency
+                                let color_view = msaa_view;
+                                let resolve_target = Some(&view);
+                                let depth_stencil_attachment =
+                                    Some(wgpu::RenderPassDepthStencilAttachment {
+                                        view: depth_view,
+                                        depth_ops: Some(wgpu::Operations {
+                                            load: wgpu::LoadOp::Clear(1.0),
+                                            store: wgpu::StoreOp::Store,
+                                        }),
+                                        stencil_ops: None,
+                                    });
+                                (color_view, resolve_target, depth_stencil_attachment)
+                            }
+                            TransparencyMode::Normal => {
+                                // Standard rendering (no MSAA, no depth)
+                                (&view, None, None)
+                            }
+                        };
+
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Scene Pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
-                            resolve_target: None,
+                            view: color_view,
+                            resolve_target,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                                 store: wgpu::StoreOp::Store,
                             },
                             depth_slice: None,
                         })],
-                        depth_stencil_attachment: None,
+                        depth_stencil_attachment,
                         timestamp_writes: None,
                         occlusion_query_set: None,
                         multiview_mask: None,
@@ -400,6 +738,11 @@ impl ApplicationHandler for SplatApp {
                 state.gpu.ctx.queue.submit(Some(encoder.finish()));
                 output.present();
                 state.gpu.window.request_redraw();
+
+                // Load file after presenting (to avoid holding state borrow)
+                if let Some(path) = load_file_path {
+                    self.load_ply_file(path);
+                }
 
                 if ui_out.open_rerun {
                     Self::open_in_rerun(&mut self.rerun_rec, &self.splats);

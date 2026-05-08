@@ -1,22 +1,34 @@
 use std::{env, path::PathBuf};
 
-use wgsl_bindgen::{GlamWgslTypeMap, WgslBindgenOptionBuilder, WgslTypeSerializeStrategy};
+use wgsl_bindgen::{
+    GlamWgslTypeMap, WgslBindgenOptionBuilder, WgslShaderSourceType, WgslTypeSerializeStrategy,
+};
+
+const SHADERS: &[&str] = &["splat.wgsl", "splat_stochastic.wgsl"];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    print!("cargo:rerun-if-changed=shaders/splat.wgsl");
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let out = out_dir.join("shader_bindings.rs");
+    let out = out_dir.join("shaders.rs");
 
-    let src = WgslBindgenOptionBuilder::default()
+    let mut builder = WgslBindgenOptionBuilder::default();
+    builder
         .workspace_root("shaders")
-        .add_entry_point("shaders/splat.wgsl")
+        .shader_source_type(
+            WgslShaderSourceType::EmbedSource | WgslShaderSourceType::ComposerWithRelativePath,
+        )
         .serialization_strategy(WgslTypeSerializeStrategy::Bytemuck)
         .type_map(GlamWgslTypeMap)
-        .skip_header_comments(true)
+        .short_constructor(4)
+        .skip_header_comments(true);
+
+    for shader in SHADERS {
+        builder.add_entry_point(format!("shaders/{}", shader));
+    }
+
+    let src = builder
         .build()?
         .generate_string()?
-        .lines() // Fix some wierd bug with inner attributes
+        .lines()
         .filter(|line| !line.trim().starts_with("#![allow"))
         .collect::<Vec<_>>()
         .join("\n");

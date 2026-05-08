@@ -3,8 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use tap::Tap;
-use wgpu;
+use wgpu::Features;
 use winit::{dpi::PhysicalSize, window::Window};
 
 #[derive(Clone, Debug)]
@@ -44,7 +43,7 @@ impl GpuState {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Primary Device"),
                 required_limits: adapter.limits(),
-                required_features: wgpu::Features::FLOAT32_FILTERABLE,
+                required_features: Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
                 ..Default::default()
             })
             .await
@@ -74,30 +73,29 @@ impl GpuState {
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: wgpu::PresentMode::Mailbox,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
 
-        let ctx = GpuContext {
-            device,
-            queue,
-            surface_format,
-        };
-
-        Self {
+        let mut state = Self {
             instance,
             adapter,
-            ctx,
+            ctx: GpuContext {
+                device,
+                queue,
+                surface_format,
+            },
             surface,
             surface_config,
             window,
             device_lost,
-        }
-        .tap_mut(|this| this.reconfigure_surface())
+        };
+        state.reconfigure_surface();
+        state
     }
 
     pub fn resize(&mut self, PhysicalSize { width, height }: PhysicalSize<u32>) {
@@ -108,19 +106,16 @@ impl GpuState {
         }
     }
 
-    /// Reconfigure the surface
     pub fn reconfigure_surface(&mut self) {
         self.surface
             .configure(&self.ctx.device, &self.surface_config);
     }
 
-    /// Recreate and reconfigure the surface after a surface-only `Lost` event.
     pub fn recreate_surface(&mut self) {
         self.surface = self
             .instance
             .create_surface(self.window.clone())
             .expect("Failed to recreate surface");
-
         self.reconfigure_surface();
     }
 }
