@@ -20,7 +20,6 @@
 
         buildInputs = with pkgs; [
           wayland
-          rerun
         ];
 
         LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.libclang ];

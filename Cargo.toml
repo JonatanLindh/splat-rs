@@ -17,7 +17,6 @@ winit = "0.30.13"
 egui.version = "0.34"
 egui-wgpu.version = "0.34"
 egui-winit.version = "0.34"
-rerun = { version = "0.31", default-features = false, features = ["sdk"] }
 
 bytemuck = "1.25"
 

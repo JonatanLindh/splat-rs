@@ -21,7 +21,6 @@ use crate::{
 /// Camera input collected from the egui viewport each frame.
 #[derive(Default)]
 struct UiOutput {
-    open_rerun: bool,
     load_file: bool,
     transparency_changed: bool,
     /// Right-drag delta in screen pixels.
@@ -280,14 +279,6 @@ impl ActiveState {
                             }
                         }
                     }
-
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    if ui.button("Visualize in Rerun").clicked() {
-                        ui_out.open_rerun = true;
-                    }
                 });
 
             // Viewport drag area
@@ -436,7 +427,6 @@ pub struct SplatApp {
     splats: Vec<GpuSplat>,
     stochastic_transparency: bool,
     msaa_samples: u32,
-    rerun_rec: Option<rerun::RecordingStream>,
     ply_path: Option<std::path::PathBuf>,
     needs_reinit: bool,
 }
@@ -464,7 +454,6 @@ impl SplatApp {
             splats,
             stochastic_transparency: false,
             msaa_samples: 4,
-            rerun_rec: None,
             ply_path,
             needs_reinit: false,
         }
@@ -502,19 +491,6 @@ impl SplatApp {
             Err(e) => {
                 tracing::error!("Failed to load {}: {}", path.display(), e);
             }
-        }
-    }
-
-    /// Takes fields as parameters so it can be called while `self.state` is mutably borrowed.
-    fn open_in_rerun(rerun_rec: &mut Option<rerun::RecordingStream>, splats: &[GpuSplat]) {
-        if rerun_rec.is_none() {
-            match rerun::RecordingStreamBuilder::new("splat-rs").spawn() {
-                Ok(rec) => *rerun_rec = Some(rec),
-                Err(e) => eprintln!("Failed to spawn Rerun viewer: {e}"),
-            }
-        }
-        if let Some(rec) = rerun_rec.as_ref() {
-            crate::ply::log_splats_to_rerun(rec, splats);
         }
     }
 }
@@ -742,10 +718,6 @@ impl ApplicationHandler for SplatApp {
                 // Load file after presenting (to avoid holding state borrow)
                 if let Some(path) = load_file_path {
                     self.load_ply_file(path);
-                }
-
-                if ui_out.open_rerun {
-                    Self::open_in_rerun(&mut self.rerun_rec, &self.splats);
                 }
             }
 
