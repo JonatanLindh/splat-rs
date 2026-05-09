@@ -56,6 +56,7 @@ enum TransparencyMode {
     Stochastic(MsaaDepth),
 }
 
+#[allow(unused)]
 struct MsaaDepth {
     msaa_texture: wgpu::Texture,
     msaa_view: wgpu::TextureView,

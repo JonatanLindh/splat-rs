@@ -21,6 +21,7 @@ struct GpuSplat {
 }
 
 @group(0) @binding(1) var<storage, read> splats: array<GpuSplat>;
+@group(0) @binding(2) var<storage, read> sorted_indices: array<u32>;
 
 struct VertexOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -35,9 +36,9 @@ struct VertexOut {
 fn quat_to_mat3(q: vec4<f32>) -> mat3x3<f32> {
     let x = q.x;  let y = q.y;  let z = q.z; let w = q.w;
     return mat3x3<f32>(
-        vec3<f32>(1.0 - 2.0 * (y*y + z*z),       2.0 * (x*y + w*z),       2.0 * (x*z - w*y)),
-        vec3<f32>(      2.0 * (x*y - w*z), 1.0 - 2.0 * (x*x + z*z),       2.0 * (y*z + w*x)),
-        vec3<f32>(      2.0 * (x*z + w*y),       2.0 * (y*z - w*x), 1.0 - 2.0 * (x*x + y*y)),
+        vec3<f32>(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)),
+        vec3<f32>(2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w * x)),
+        vec3<f32>(2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y)),
     );
 }
 
@@ -88,7 +89,9 @@ const QUAD: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
 fn compute_vertex(vi: u32) -> VertexOut {
     let splat_id = vi / 6u;
     let corner_id = vi % 6u;
-    let splat = splats[splat_id];
+
+    let splat_idx = sorted_indices[splat_id];
+    let splat = splats[splat_idx];
 
     // We can fuse some math here to avoid a matrix multiplication per gaussian
     // S = diag(exp(scale))

@@ -17,6 +17,7 @@ pub mod hot_reload;
 pub mod ply;
 pub mod radix_sort_cpu;
 pub mod renderer;
+pub mod sorter;
 
 use winit::event_loop::{ControlFlow, EventLoop};
 

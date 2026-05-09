@@ -4,7 +4,7 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use crate::{
     camera::Camera,
     gpu::GpuContext,
-    radix_sort_cpu::{self, RadixSort},
+    radix_sort_cpu,
     shaders::{
         self,
         splat_common::{
@@ -12,22 +12,26 @@ use crate::{
             WgpuBindGroup0EntriesParams,
         },
     },
+    sorter::Sorter,
 };
 
 pub struct SplatRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: WgpuBindGroup0,
     camera_buf: wgpu::Buffer,
+
+    #[allow(unused)]
     splat_buf: wgpu::Buffer,
     splat_count: u32,
     stochastic_transparency: bool,
 
+    sorter: Sorter,
+
     /// unsorted GPU splats
     splats: Vec<GpuSplat>,
-    /// scratch for sorted gpu splats
-    sorted_splats: Vec<GpuSplat>,
     /// scratch for depth-sorting indices
-    depth_indices: Vec<(u32, usize)>,
+    depths: Vec<u32>,
+    indices: Vec<u32>,
 }
 
 impl SplatRenderer {
@@ -128,18 +132,21 @@ impl SplatRenderer {
                 })
         };
 
+        let splat_count = splats.len() as u32;
+        let depths = Vec::with_capacity(splats.len());
+        let indices = Vec::with_capacity(splats.len());
+
+        let sorter = Sorter::new(ctx, splats.len() as u32);
+
         // Bind group
         let bind_group = WgpuBindGroup0::from_bindings(
             &ctx.device,
             WgpuBindGroup0Entries::new(WgpuBindGroup0EntriesParams {
                 camera: camera_buf.as_entire_buffer_binding(),
                 splats: splat_buf.as_entire_buffer_binding(),
+                sorted_indices: sorter.in_payload.as_entire_buffer_binding(),
             }),
         );
-
-        let splat_count = splats.len() as u32;
-        let sorted_splats = Vec::with_capacity(splats.len());
-        let depth_indices = Vec::with_capacity(splats.len());
 
         Self {
             pipeline,
@@ -149,8 +156,9 @@ impl SplatRenderer {
             splat_count,
             stochastic_transparency,
             splats,
-            sorted_splats,
-            depth_indices,
+            depths,
+            indices,
+            sorter,
         }
     }
 
@@ -163,33 +171,54 @@ impl SplatRenderer {
             return;
         }
 
+        if self.splats.is_empty() {
+            return;
+        }
+
         let view = camera.view_matrix();
         let z_row = view.row(2).truncate();
 
-        self.depth_indices.clear();
+        self.depths.clear();
+        self.indices.clear();
         self.splats
             .par_iter()
             .enumerate()
             .map(|(i, splat)| {
                 let depth = z_row.dot(splat.position);
-                (radix_sort_cpu::f32_sortable_bits(depth), i)
+                (
+                    radix_sort_cpu::f32_sortable_bits(depth),
+                    i.try_into().unwrap(),
+                )
             })
-            .collect_into_vec(&mut self.depth_indices);
+            .unzip_into_vecs(&mut self.depths, &mut self.indices);
 
-        self.depth_indices.par_radix_sort_unstable();
-
-        self.sorted_splats.clear();
-        self.sorted_splats.extend(
-            self.depth_indices
-                .iter()
-                .map(|&(_, original_idx)| self.splats[original_idx]),
-        );
+        ctx.queue
+            .write_buffer(&self.sorter.in_keys, 0, bytemuck::cast_slice(&self.depths));
 
         ctx.queue.write_buffer(
-            &self.splat_buf,
+            &self.sorter.in_payload,
             0,
-            bytemuck::cast_slice(&self.sorted_splats),
+            bytemuck::cast_slice(&self.indices),
         );
+
+        // {
+        //     let mut encoder = ctx
+        //         .device
+        //         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+        //     self.sorter.sort(&mut encoder, self.splat_count, true);
+
+        //     ctx.queue.submit(std::iter::once(encoder.finish()));
+        // }
+        {
+            let mut encoder = ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+            self.sorter.sort(&mut encoder, self.splat_count, false);
+
+            ctx.queue.submit(std::iter::once(encoder.finish()));
+        }
     }
 
     /// Rebuild the pipeline with a new shader module (for hot-reloading).

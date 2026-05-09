@@ -43,7 +43,9 @@ impl GpuState {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Primary Device"),
                 required_limits: adapter.limits(),
-                required_features: Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+                required_features: Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+                    | Features::IMMEDIATES
+                    | Features::SUBGROUP,
                 ..Default::default()
             })
             .await

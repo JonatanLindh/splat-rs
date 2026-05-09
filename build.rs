@@ -1,10 +1,11 @@
 use std::{env, path::PathBuf};
 
 use wgsl_bindgen::{
-    GlamWgslTypeMap, WgslBindgenOptionBuilder, WgslShaderSourceType, WgslTypeSerializeStrategy,
+    GlamWgslTypeMap, WgslBindgenOptionBuilder, WgslShaderIrCapabilities, WgslShaderSourceType,
+    WgslTypeSerializeStrategy,
 };
 
-const SHADERS: &[&str] = &["splat.wgsl", "splat_stochastic.wgsl"];
+const SHADERS: &[&str] = &["splat.wgsl", "splat_stochastic.wgsl", "sort.wgsl"];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -19,7 +20,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serialization_strategy(WgslTypeSerializeStrategy::Bytemuck)
         .type_map(GlamWgslTypeMap)
         .short_constructor(4)
-        .skip_header_comments(true);
+        .skip_header_comments(true)
+        .ir_capabilities(WgslShaderIrCapabilities::all());
 
     for shader in SHADERS {
         builder.add_entry_point(format!("shaders/{}", shader));
