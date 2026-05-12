@@ -1,7 +1,5 @@
 use std::mem;
 
-use wgpu::wgc::binding_model::BindError;
-
 use crate::{
     gpu::GpuContext,
     shaders::sort::{
@@ -23,8 +21,6 @@ pub struct Sorter {
     // Bind Groups
     bind_group_even: WgpuBindGroup0, // Reads sort_buffer, writes alt_buffer
     bind_group_odd: WgpuBindGroup0,  // Reads alt_buffer, writes sort_buffer
-    bind_group_even_key_payload_swapped: WgpuBindGroup0, // For scatter pass when keys and payloads are swapped
-    bind_group_odd_key_payload_swapped: WgpuBindGroup0, // For scatter pass when keys and payloads are swapped
 
     // State Buffers (Need to be cleared before each full sort)
     pass_histograms: wgpu::Buffer,
@@ -113,28 +109,6 @@ impl Sorter {
             }),
         );
 
-        let bind_group_even_key_payload_swapped = WgpuBindGroup0::from_bindings(
-            device,
-            WgpuBindGroup0Entries::new(WgpuBindGroup0EntriesParams {
-                in_keys: in_payload.as_entire_buffer_binding(),
-                in_payload: in_keys.as_entire_buffer_binding(),
-                out_keys: out_payload.as_entire_buffer_binding(),
-                out_payload: out_keys.as_entire_buffer_binding(),
-                pass_histograms: pass_histograms.as_entire_buffer_binding(),
-            }),
-        );
-
-        let bind_group_odd_key_payload_swapped = WgpuBindGroup0::from_bindings(
-            device,
-            WgpuBindGroup0Entries::new(WgpuBindGroup0EntriesParams {
-                in_keys: out_payload.as_entire_buffer_binding(),
-                in_payload: out_keys.as_entire_buffer_binding(),
-                out_keys: in_payload.as_entire_buffer_binding(),
-                out_payload: in_keys.as_entire_buffer_binding(),
-                pass_histograms: pass_histograms.as_entire_buffer_binding(),
-            }),
-        );
-
         // Create the 3 pipelines mapped to your Slang entry points
         let count_pipeline = create_cs_count_pass_pipeline_embed_source(device);
         let scan_pipeline = create_cs_scan_pass_pipeline_embed_source(device);
@@ -146,8 +120,6 @@ impl Sorter {
             scatter_pipeline,
             bind_group_even,
             bind_group_odd,
-            bind_group_even_key_payload_swapped,
-            bind_group_odd_key_payload_swapped,
             pass_histograms,
             in_keys,
             in_payload,
@@ -157,16 +129,14 @@ impl Sorter {
         }
     }
 
-    fn get_bind_group_for_pass(&self, pass: u32, swapped: bool) -> &WgpuBindGroup0 {
-        match (pass.is_multiple_of(2), swapped) {
-            (true, false) => &self.bind_group_even,
-            (false, false) => &self.bind_group_odd,
-            (true, true) => &self.bind_group_even_key_payload_swapped,
-            (false, true) => &self.bind_group_odd_key_payload_swapped,
+    fn get_bind_group_for_pass(&self, pass: u32) -> &WgpuBindGroup0 {
+        match pass.is_multiple_of(2) {
+            true => &self.bind_group_even,
+            false => &self.bind_group_odd,
         }
     }
 
-    pub fn sort(&self, encoder: &mut wgpu::CommandEncoder, num_elements: u32, swapped: bool) {
+    pub fn sort(&self, encoder: &mut wgpu::CommandEncoder, num_elements: u32) {
         if num_elements == 0 {
             return;
         }
@@ -193,7 +163,7 @@ impl Sorter {
             push_constants.shift = pass * 8; // Radix Log = 8
 
             // Ping-pong the bind groups
-            let bind_group = self.get_bind_group_for_pass(pass, swapped);
+            let bind_group = self.get_bind_group_for_pass(pass);
 
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

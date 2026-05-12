@@ -15,6 +15,7 @@ pub mod camera;
 pub mod gpu;
 pub mod hot_reload;
 pub mod ply;
+pub mod prepare;
 pub mod radix_sort_cpu;
 pub mod renderer;
 pub mod sorter;

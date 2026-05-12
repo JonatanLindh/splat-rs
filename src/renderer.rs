@@ -1,10 +1,9 @@
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 use crate::{
     camera::Camera,
     gpu::GpuContext,
-    radix_sort_cpu,
+    prepare::Preparer,
     shaders::{
         self,
         splat_common::{
@@ -25,13 +24,11 @@ pub struct SplatRenderer {
     splat_count: u32,
     stochastic_transparency: bool,
 
+    preparer: Preparer,
     sorter: Sorter,
 
     /// unsorted GPU splats
     splats: Vec<GpuSplat>,
-    /// scratch for depth-sorting indices
-    depths: Vec<u32>,
-    indices: Vec<u32>,
 }
 
 impl SplatRenderer {
@@ -133,10 +130,9 @@ impl SplatRenderer {
         };
 
         let splat_count = splats.len() as u32;
-        let depths = Vec::with_capacity(splats.len());
-        let indices = Vec::with_capacity(splats.len());
 
         let sorter = Sorter::new(ctx, splats.len() as u32);
+        let preparer = Preparer::new(ctx, sorter.in_keys.clone(), splat_buf.clone());
 
         // Bind group
         let bind_group = WgpuBindGroup0::from_bindings(
@@ -156,8 +152,7 @@ impl SplatRenderer {
             splat_count,
             stochastic_transparency,
             splats,
-            depths,
-            indices,
+            preparer,
             sorter,
         }
     }
@@ -175,47 +170,15 @@ impl SplatRenderer {
             return;
         }
 
-        let view = camera.view_matrix();
-        let z_row = view.row(2).truncate();
-
-        self.depths.clear();
-        self.indices.clear();
-        self.splats
-            .par_iter()
-            .enumerate()
-            .map(|(i, splat)| {
-                let depth = z_row.dot(splat.position);
-                (
-                    radix_sort_cpu::f32_sortable_bits(depth),
-                    i.try_into().unwrap(),
-                )
-            })
-            .unzip_into_vecs(&mut self.depths, &mut self.indices);
-
-        ctx.queue
-            .write_buffer(&self.sorter.in_keys, 0, bytemuck::cast_slice(&self.depths));
-
-        ctx.queue.write_buffer(
-            &self.sorter.in_payload,
-            0,
-            bytemuck::cast_slice(&self.indices),
-        );
-
-        // {
-        //     let mut encoder = ctx
-        //         .device
-        //         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-        //     self.sorter.sort(&mut encoder, self.splat_count, true);
-
-        //     ctx.queue.submit(std::iter::once(encoder.finish()));
-        // }
         {
             let mut encoder = ctx
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-            self.sorter.sort(&mut encoder, self.splat_count, false);
+            self.preparer
+                .run(&mut encoder, self.splat_count, &cam_uniform);
+
+            self.sorter.sort(&mut encoder, self.splat_count);
 
             ctx.queue.submit(std::iter::once(encoder.finish()));
         }

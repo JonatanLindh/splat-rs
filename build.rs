@@ -5,7 +5,12 @@ use wgsl_bindgen::{
     WgslTypeSerializeStrategy,
 };
 
-const SHADERS: &[&str] = &["splat.wgsl", "splat_stochastic.wgsl", "sort.wgsl"];
+const SHADERS: &[&str] = &[
+    "splat.wgsl",
+    "splat_stochastic.wgsl",
+    "sort.wgsl",
+    "prepare.wgsl",
+];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());

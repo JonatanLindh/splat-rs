@@ -42,7 +42,6 @@ struct WLMSResult {
     leader_lane: u32,
 }
 
-
 fn get_wlms_offsets(digit: u32, sid: u32, subgroup_size: u32) -> WLMSResult {
     // find all lanes that have the exact same digit
     var m = vec4<u32>(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu);
