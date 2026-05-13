@@ -19,12 +19,14 @@ impl Preparer {
     pub fn new(
         GpuContext { device, .. }: &GpuContext,
         depth_buffer: wgpu::Buffer,
+        index_buffer: wgpu::Buffer,
         splat_buffer: wgpu::Buffer,
     ) -> Self {
         let bind_group = WgpuBindGroup0::from_bindings(
             device,
             WgpuBindGroup0Entries::new(WgpuBindGroup0EntriesParams {
                 u32_depths: depth_buffer.as_entire_buffer_binding(),
+                u32_indices: index_buffer.as_entire_buffer_binding(),
                 splats: splat_buffer.as_entire_buffer_binding(),
             }),
         );
@@ -48,10 +50,7 @@ impl Preparer {
             return;
         }
 
-        let push_constants = PushConstants {
-            count: num_elements,
-            camera_view_z: camera_uniform.view.row(2).truncate(),
-        };
+        let push_constants = PushConstants(camera_uniform.view.row(2).into(), num_elements);
 
         let blocks = num_elements.div_ceil(WG_SIZE);
 

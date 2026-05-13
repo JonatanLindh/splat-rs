@@ -132,7 +132,12 @@ impl SplatRenderer {
         let splat_count = splats.len() as u32;
 
         let sorter = Sorter::new(ctx, splats.len() as u32);
-        let preparer = Preparer::new(ctx, sorter.in_keys.clone(), splat_buf.clone());
+        let preparer = Preparer::new(
+            ctx,
+            sorter.in_keys.clone(),
+            sorter.in_payload.clone(),
+            splat_buf.clone(),
+        );
 
         // Bind group
         let bind_group = WgpuBindGroup0::from_bindings(
