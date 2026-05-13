@@ -50,7 +50,7 @@ impl Preparer {
             return;
         }
 
-        let push_constants = PushConstants(camera_uniform.view.row(2).into(), num_elements);
+        let push_constants = PushConstants(camera_uniform.view.row(2), num_elements);
 
         let blocks = num_elements.div_ceil(WG_SIZE);
 

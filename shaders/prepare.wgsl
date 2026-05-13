@@ -25,8 +25,6 @@ fn cs_prepare(@builtin(global_invocation_id) gid: vec3<u32>) {
     if idx >= pc.count { return; }
 
     let splat = splats[idx];
-    // view_z = dot(view_row_2, [pos, 1.0])
-    // More negative = further away. Sorting ascending gives Back-to-Front.
     let depth = dot(pc.camera_view_row_z, vec4<f32>(splat.position, 1.0));
     u32_depths[idx] = f32_sortable_bits(depth);
     u32_indices[idx] = idx;
