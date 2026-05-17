@@ -78,9 +78,13 @@ impl Camera {
 
 impl CameraUniform {
     pub fn from_camera(camera: &Camera, width: u32, height: u32) -> Self {
+        let view = camera.view_matrix();
+        let proj = camera.proj_matrix(width, height);
+
         CameraUniformInit {
-            view: camera.view_matrix(),
-            proj: camera.proj_matrix(width, height),
+            view,
+            proj,
+            view_proj: proj * view,
             viewport: Vec2::new(width as f32, height as f32),
             camera_pos: camera.position,
         }

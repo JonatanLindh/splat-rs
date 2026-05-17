@@ -2,13 +2,16 @@ use std::mem;
 
 use crate::{
     gpu::GpuContext,
-    shaders::sort::{
-        BIN_PART_SIZE, PushConstants, RADIX, WgpuBindGroup0, WgpuBindGroup0Entries,
-        WgpuBindGroup0EntriesParams,
-        compute::{
-            create_cs_count_pass_pipeline_embed_source, create_cs_scan_pass_pipeline_embed_source,
-            create_cs_scatter_pass_pipeline_embed_source,
+    shaders::{
+        sort::{
+            PushConstants, RADIX, WgpuBindGroup0, WgpuBindGroup0Entries,
+            WgpuBindGroup0EntriesParams,
+            compute::{
+                create_cs_count_pass_pipeline_embed_source, create_cs_scan_pass_pipeline_embed_source,
+                create_cs_scatter_pass_pipeline_embed_source,
+            },
         },
+        splat_common::BIN_PART_SIZE,
     },
 };
 
@@ -19,10 +22,9 @@ pub struct Sorter {
     scatter_pipeline: wgpu::ComputePipeline,
 
     // Bind Groups
-    bind_group_even: WgpuBindGroup0, // Reads sort_buffer, writes alt_buffer
-    bind_group_odd: WgpuBindGroup0,  // Reads alt_buffer, writes sort_buffer
+    bind_group_even: WgpuBindGroup0,
+    bind_group_odd: WgpuBindGroup0,
 
-    // State Buffers (Need to be cleared before each full sort)
     pass_histograms: wgpu::Buffer,
 
     // Data Buffers
@@ -31,11 +33,15 @@ pub struct Sorter {
     pub out_keys: wgpu::Buffer,
     pub out_payload: wgpu::Buffer,
 
-    max_elements: u32,
+    pub count_buf: wgpu::Buffer,
 }
 
 impl Sorter {
-    pub fn new(GpuContext { device, .. }: &GpuContext, max_elements: u32) -> Self {
+    pub fn new(
+        GpuContext { device, .. }: &GpuContext,
+        max_elements: u32,
+        count_buf: wgpu::Buffer,
+    ) -> Self {
         let max_blocks_binning = max_elements.div_ceil(BIN_PART_SIZE);
         let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
 
@@ -92,6 +98,7 @@ impl Sorter {
                 out_keys: out_keys.as_entire_buffer_binding(),
                 out_payload: out_payload.as_entire_buffer_binding(),
                 pass_histograms: pass_histograms.as_entire_buffer_binding(),
+                count: count_buf.as_entire_buffer_binding(),
             }),
         );
 
@@ -106,6 +113,7 @@ impl Sorter {
                 out_payload: in_payload.as_entire_buffer_binding(),
                 //
                 pass_histograms: pass_histograms.as_entire_buffer_binding(),
+                count: count_buf.as_entire_buffer_binding(),
             }),
         );
 
@@ -125,7 +133,7 @@ impl Sorter {
             in_payload,
             out_keys,
             out_payload,
-            max_elements,
+            count_buf,
         }
     }
 
@@ -136,27 +144,14 @@ impl Sorter {
         }
     }
 
-    pub fn sort(&self, encoder: &mut wgpu::CommandEncoder, num_elements: u32) {
-        if num_elements == 0 {
-            return;
-        }
-
-        assert!(
-            num_elements <= self.max_elements,
-            "Exceeded pre-allocated sorting capacity"
-        );
-
+    pub fn sort(&self, encoder: &mut wgpu::CommandEncoder, dispatch_indirect_args: &wgpu::Buffer) {
         // 1. Clear state buffers
         encoder.clear_buffer(&self.pass_histograms, 0, None);
 
         let mut push_constants = PushConstants {
-            size: num_elements,
             shift: 0,
             pass_index: 0,
         };
-
-        // 4. Digit Binning Passes (The OneSweep)
-        let binning_blocks = num_elements.div_ceil(BIN_PART_SIZE);
 
         for pass in 0..4 {
             push_constants.pass_index = pass;
@@ -174,7 +169,7 @@ impl Sorter {
                 cpass.set_immediates(0, bytemuck::cast_slice(&[push_constants]));
                 bind_group.set(&mut cpass);
 
-                cpass.dispatch_workgroups(binning_blocks, 1, 1);
+                cpass.dispatch_workgroups_indirect(dispatch_indirect_args, 0);
             }
 
             {
@@ -200,7 +195,7 @@ impl Sorter {
                 cpass.set_immediates(0, bytemuck::cast_slice(&[push_constants]));
                 bind_group.set(&mut cpass);
 
-                cpass.dispatch_workgroups(binning_blocks, 1, 1);
+                cpass.dispatch_workgroups_indirect(dispatch_indirect_args, 0);
             }
         }
     }

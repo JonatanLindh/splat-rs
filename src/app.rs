@@ -43,6 +43,8 @@ struct AppState<'a> {
     ply_path: &'a Option<std::path::PathBuf>,
     stochastic_transparency: &'a mut bool,
     msaa_samples: &'a mut u32,
+    view_frustum_culling: &'a mut bool,
+    invert_culling: &'a mut bool,
 }
 
 // ── Active GPU + UI state ─────────────────────────────────────────────────────
@@ -259,6 +261,11 @@ impl ActiveState {
                         ui_out.transparency_changed = true;
                     }
 
+                    ui.checkbox(app_state.view_frustum_culling, "View Frustum Culling");
+                    if *app_state.view_frustum_culling {
+                        ui.checkbox(app_state.invert_culling, "Invert Culling (Debug)");
+                    }
+
                     if *app_state.stochastic_transparency {
                         ui.label(egui::RichText::new("MSAA Samples").strong());
                         for sample_count in self
@@ -430,6 +437,8 @@ pub struct SplatApp {
     msaa_samples: u32,
     ply_path: Option<std::path::PathBuf>,
     needs_reinit: bool,
+    view_frustum_culling: bool,
+    invert_culling: bool,
 }
 
 impl Default for SplatApp {
@@ -457,6 +466,8 @@ impl SplatApp {
             msaa_samples: 4,
             ply_path,
             needs_reinit: false,
+            view_frustum_culling: true,
+            invert_culling: false,
         }
     }
 
@@ -628,6 +639,8 @@ impl ApplicationHandler for SplatApp {
                     ply_path: &self.ply_path,
                     stochastic_transparency: &mut self.stochastic_transparency,
                     msaa_samples: &mut self.msaa_samples,
+                    view_frustum_culling: &mut self.view_frustum_culling,
+                    invert_culling: &mut self.invert_culling,
                 };
                 let (full_output, ui_out) = state.run_ui(&self.egui_ctx, &mut app_state);
 
@@ -659,9 +672,14 @@ impl ApplicationHandler for SplatApp {
                 state.camera.position += Vec3::Y * ui_out.move_up * speed;
 
                 // Scene pass (clears + draws splats)
-                state
-                    .splat_renderer
-                    .prepare(&state.gpu.ctx, &state.camera, w, h);
+                state.splat_renderer.prepare(
+                    &state.gpu.ctx,
+                    &state.camera,
+                    w,
+                    h,
+                    self.view_frustum_culling,
+                    self.invert_culling,
+                );
                 {
                     let (color_view, resolve_target, depth_stencil_attachment) =
                         match &state.transparency_mode {

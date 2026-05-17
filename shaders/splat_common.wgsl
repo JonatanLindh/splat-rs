@@ -1,10 +1,9 @@
 #define_import_path splat_common
 
-// ── Common structures and bindings ────────────────────────────────────────────
-
 struct CameraUniform {
     view: mat4x4<f32>,
     proj: mat4x4<f32>,
+    view_proj: mat4x4<f32>,
     viewport: vec2<f32>,
     camera_pos: vec3<f32>,   // world-space eye position
 }
@@ -46,6 +45,12 @@ fn sigmoid(x: f32) -> f32 {
     return 1.0 / (1.0 + exp(-x));
 }
 
+fn div_ceil(a: u32, b: u32) -> u32 {
+    return (a + b - 1u) / b;
+}
+
+const BIN_PART_SIZE: u32 = 7680u;
+
 // ── Spherical Harmonics constants ────────────────────────────────────────────
 //
 // Sources:
@@ -79,16 +84,16 @@ const SH_C3_5: f32 = 0.25 * sqrt(105.0 / PI);
 const SH_C3_6: f32 = -0.25 * sqrt(35.0 / (2.0 * PI));
 
 // Two triangles = one quad; corners in local 2D space.
-const QUAD: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
-    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
-    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
+const QUAD: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0),
+    vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
 );
 
 // ── Shared vertex shader logic ───────────────────────────────────────────────
 
-fn compute_vertex(vi: u32) -> VertexOut {
-    let splat_id = vi / 6u;
-    let corner_id = vi % 6u;
+fn compute_vertex(vi: u32, ii: u32) -> VertexOut {
+    let splat_id = ii;
+    let corner_id = vi;
 
     let splat_idx = sorted_indices[splat_id];
     let splat = splats[splat_idx];

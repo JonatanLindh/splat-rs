@@ -1,5 +1,6 @@
+#import splat_common::{div_ceil, BIN_PART_SIZE}
+
 struct PushConstants {
-    size: u32,
     shift: u32,
     pass_index: u32,
 }
@@ -9,8 +10,6 @@ var<immediate> pc: PushConstants;
 const RADIX: u32 = 256u;
 const RADIX_MASK: u32 = 255u;
 
-const BIN_PART_SIZE: u32 = 7680u;
-
 @group(0) @binding(0) var<storage, read_write> in_keys: array<u32>;
 @group(0) @binding(1) var<storage, read_write> in_payload: array<u32>;
 
@@ -19,13 +18,10 @@ const BIN_PART_SIZE: u32 = 7680u;
 
 @group(0) @binding(4) var<storage, read_write> pass_histograms: array<atomic<u32>>;
 
+@group(0) @binding(5) var<storage, read> count: u32;
+
 var<workgroup> s_localHistogram: array<atomic<u32>, RADIX>;
 var<workgroup> s_scan_temp: array<u32, RADIX>;
-
-// Helper for div_ceil
-fn div_ceil(a: u32, b: u32) -> u32 {
-    return (a + b - 1u) / b;
-}
 
 @compute @workgroup_size(RADIX)
 fn cs_count_pass(
@@ -42,7 +38,7 @@ fn cs_count_pass(
     // count elements in this partition
     for (var i = tid.x; i < BIN_PART_SIZE; i += RADIX) {
         let global_idx = start_idx + i;
-        if global_idx < pc.size {
+        if global_idx < count {
             let key = in_keys[global_idx];
             let digit = (key >> pc.shift) & RADIX_MASK;
             atomicAdd(&s_localHistogram[digit], 1u);
@@ -51,7 +47,7 @@ fn cs_count_pass(
     workgroupBarrier();
 
     // write local counts to the global spine
-    let num_blocks = div_ceil(pc.size, BIN_PART_SIZE);
+    let num_blocks = div_ceil(count, BIN_PART_SIZE);
     let pass_offset = pc.pass_index * (num_blocks * RADIX);
     let count = atomicLoad(&s_localHistogram[tid.x]);
     atomicStore(&pass_histograms[pass_offset + (block_id * RADIX) + tid.x], count);
@@ -62,7 +58,7 @@ fn cs_scan_pass(
     @builtin(local_invocation_id) tid: vec3<u32>
 ) {
     let digit = tid.x;
-    let num_blocks = div_ceil(pc.size, BIN_PART_SIZE);
+    let num_blocks = div_ceil(count, BIN_PART_SIZE);
     let pass_offset = pc.pass_index * (num_blocks * RADIX);
 
     // find the total count of this digit across all blocks
@@ -108,7 +104,7 @@ fn cs_scatter_pass(
     @builtin(workgroup_id) wid: vec3<u32>
 ) {
     let block_id = wid.x;
-    let num_blocks = div_ceil(pc.size, BIN_PART_SIZE);
+    let num_blocks = div_ceil(count, BIN_PART_SIZE);
     let start_idx = block_id * BIN_PART_SIZE;
     let pass_offset = pc.pass_index * (num_blocks * RADIX);
 
@@ -121,7 +117,7 @@ fn cs_scatter_pass(
 
     for (var i = tid.x; i < BIN_PART_SIZE; i += RADIX) {
         let global_idx = start_idx + i;
-        if global_idx >= pc.size { continue; }
+        if global_idx >= count { continue; }
 
         let key = in_keys[global_idx];
         let payload = in_payload[global_idx];

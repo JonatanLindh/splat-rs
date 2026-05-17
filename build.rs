@@ -12,7 +12,13 @@ const SHADERS: &[&str] = &[
     "prepare.wgsl",
 ];
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(e) = make_shaders() {
+        panic!("Failed to generate shaders: {e}");
+    }
+}
+
+fn make_shaders() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let out = out_dir.join("shaders.rs");
 
