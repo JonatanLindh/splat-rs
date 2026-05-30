@@ -49,7 +49,7 @@ fn div_ceil(a: u32, b: u32) -> u32 {
     return (a + b - 1u) / b;
 }
 
-const BIN_PART_SIZE: u32 = 7680u;
+const BIN_PART_SIZE: u32 = 2048;
 
 // ── Spherical Harmonics constants ────────────────────────────────────────────
 //
