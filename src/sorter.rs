@@ -7,7 +7,8 @@ use crate::{
             PushConstants, RADIX, WgpuBindGroup0, WgpuBindGroup0Entries,
             WgpuBindGroup0EntriesParams,
             compute::{
-                create_cs_count_pass_pipeline_embed_source, create_cs_scan_pass_pipeline_embed_source,
+                create_cs_count_pass_pipeline_embed_source,
+                create_cs_scan_pass_pipeline_embed_source,
                 create_cs_scatter_pass_pipeline_embed_source,
             },
         },
@@ -47,10 +48,10 @@ impl Sorter {
 
         // --- Buffer Creation ---
 
-        // Spine buffer for decoupled lookback
+        // Spine buffer
         let pass_histograms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Pass Histograms (Spine)"),
-            size: (4 * (max_blocks_binning + 1) * RADIX * mem::size_of::<u32>() as u32)
+            size: (4 * max_blocks_binning * RADIX * mem::size_of::<u32>() as u32)
                 as wgpu::BufferAddress,
             usage,
             mapped_at_creation: false,
