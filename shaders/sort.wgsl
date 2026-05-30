@@ -49,13 +49,17 @@ fn cs_count_pass(
     // write local counts to the global spine
     let num_blocks = div_ceil(count, BIN_PART_SIZE);
     let pass_offset = pc.pass_index * (num_blocks * RADIX);
-    let count = atomicLoad(&s_localHistogram[tid.x]);
-    atomicStore(&pass_histograms[pass_offset + (block_id * RADIX) + tid.x], count);
+    let local_count = atomicLoad(&s_localHistogram[tid.x]);
+    atomicStore(&pass_histograms[pass_offset + (block_id * RADIX) + tid.x], local_count);
 }
 
 @compute @workgroup_size(RADIX)
 fn cs_scan_pass(
-    @builtin(local_invocation_id) tid: vec3<u32>
+    @builtin(local_invocation_id) tid: vec3<u32>,
+    @builtin(subgroup_size) sg_size: u32,
+    @builtin(subgroup_id) subgroup_id: u32,
+    @builtin(subgroup_invocation_id) lane_in_sg: u32,
+    @builtin(num_subgroups) num_subgroups: u32,
 ) {
     let digit = tid.x;
     let num_blocks = div_ceil(count, BIN_PART_SIZE);
@@ -67,20 +71,32 @@ fn cs_scan_pass(
         my_digit_total += atomicLoad(&pass_histograms[pass_offset + (b * RADIX) + digit]);
     }
 
-    // group prefix sum
-    s_scan_temp[digit] = my_digit_total;
+    // Inclusive prefix sum over the 256 digit totals
 
-    for (var stride = 1u; stride < RADIX; stride <<= 1u) {
-        workgroupBarrier();
-        var temp: u32 = 0u;
-        if digit >= stride {
-            temp = s_scan_temp[digit] + s_scan_temp[digit - stride];
-        }
-        workgroupBarrier();
-        if digit >= stride {
-            s_scan_temp[digit] = temp;
+    // subgroup scan
+    let local_prefix = subgroupInclusiveAdd(my_digit_total);
+
+    // last lane of each subgroup holds the whole subgroup's sum — collect them
+    if lane_in_sg == sg_size - 1 {
+        s_scan_temp[subgroup_id] = local_prefix;
+    }
+    workgroupBarrier();
+
+    // convert the list of subgroup totals to an exclusive prefix sum
+    if digit == 0u {
+        var acc = 0u;
+        for (var i = 0u; i < num_subgroups; i++) {
+            let v = s_scan_temp[i];
+            s_scan_temp[i] = acc;
+            acc += v;
         }
     }
+    workgroupBarrier();
+
+    // combine
+    let global_prefix = local_prefix + s_scan_temp[subgroup_id];
+    workgroupBarrier();
+    s_scan_temp[digit] = global_prefix;
     workgroupBarrier();
 
     var base_offset = 0u;
@@ -92,9 +108,9 @@ fn cs_scan_pass(
     var running_offset = base_offset;
     for (var b = 0u; b < num_blocks; b++) {
         let idx = pass_offset + (b * RADIX) + digit;
-        let count = atomicLoad(&pass_histograms[idx]);
+        let block_count = atomicLoad(&pass_histograms[idx]);
         atomicStore(&pass_histograms[idx], running_offset);
-        running_offset += count;
+        running_offset += block_count;
     }
 }
 
