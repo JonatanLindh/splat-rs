@@ -23,6 +23,8 @@ pub struct SplatRenderer {
 
     #[allow(unused)]
     splat_buf: wgpu::Buffer,
+    #[allow(unused)]
+    cull_atomic_count_buffer: wgpu::Buffer,
     sort_indirect_args: wgpu::Buffer,
     draw_indirect_args: wgpu::Buffer,
     quad_index_buffer: wgpu::Buffer,
@@ -31,6 +33,9 @@ pub struct SplatRenderer {
 
     preparer: Preparer,
     sorter: Sorter,
+
+    /// unsorted GPU splats
+    splats: Vec<GpuSplat>,
 }
 
 const QUAD_INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
@@ -168,7 +173,7 @@ impl SplatRenderer {
 
         let splat_count = splats.len() as u32;
 
-        let sorter = Sorter::new(ctx, splat_count, cull_atomic_count_buffer.clone());
+        let sorter = Sorter::new(ctx, splats.len() as u32, cull_atomic_count_buffer.clone());
         let preparer = Preparer::new(
             ctx,
             sorter.in_keys.clone(),
@@ -196,8 +201,10 @@ impl SplatRenderer {
             splat_buf,
             splat_count,
             stochastic_transparency,
+            splats,
             preparer,
             sorter,
+            cull_atomic_count_buffer,
             sort_indirect_args,
             draw_indirect_args,
             quad_index_buffer,
@@ -217,7 +224,7 @@ impl SplatRenderer {
         ctx.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&[cam_uniform]));
 
-        if self.splat_count == 0 {
+        if self.splats.is_empty() {
             return;
         }
 
@@ -226,8 +233,13 @@ impl SplatRenderer {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-            self.preparer
-                .run(&mut encoder, self.splat_count, &cam_uniform, use_culling, invert_culling);
+            self.preparer.run(
+                &mut encoder,
+                self.splat_count,
+                &cam_uniform,
+                use_culling,
+                invert_culling,
+            );
 
             if !self.stochastic_transparency {
                 self.sorter.sort(&mut encoder, &self.sort_indirect_args);
