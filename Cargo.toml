@@ -35,6 +35,7 @@ rayon = "1"
 seq-macro = "0.3.6"
 notify = "8.2.0"
 rfd = "0.15"
+lampshade = "0.11"
 # wgpu_edsl = { version = "0.1.0", path = "../../../../Dev/wgpu_edsl/crates/wgpu_edsl" }
 
 [build-dependencies]
